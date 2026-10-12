@@ -60,6 +60,10 @@ const spot = new THREE.SpotLight(0xffeedd, PHOTO_SPOT, 10, Math.PI / 5, 0.6, 1.5
 spot.position.set(-1.5, 3.2, -0.6);
 spot.target.position.set(-1.5, 1.7, -2.9);
 scene.add(spot, spot.target);
+const SKILL_LIGHT = 20;                       // ความสว่างไฟส่องแผงสกิล (ปรับได้)
+const skillLight = new THREE.PointLight(0xffe0b0, SKILL_LIGHT, 8, 1.5);
+skillLight.position.set(2.2, 2.8, -0.3);
+scene.add(skillLight);
 
 // กล้องหมุนดูรอบบ้านก่อนคลิก
 const orbitCam = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.05, 500);
@@ -73,12 +77,14 @@ controls.update();
 
 // ====== กล้องเดินเข้าบ้าน (ทำในหน้าเว็บเอง ไม่พึ่งกล้องจากไฟล์ .glb) ======
 const V = (x, y, z) => new THREE.Vector3(x, z, -y);   // พิกัด Blender -> three.js
-const KEYS = [1, 50, 95, 130, 200];                    // เฟรมเดียวกับใน Blender
+const KEYS = [1, 50, 95, 130, 200, 250, 285, 320];     // เฟรมเดียวกับใน Blender
 const camCurve = new THREE.CatmullRomCurve3(
-  [V(6, -15, 3), V(0, -10.5, 2), V(0, -6, 1.7), V(0, -3, 1.7), V(0, -1.6, 1.7)], false, 'centripetal');
+  [V(6, -15, 3), V(0, -10.5, 2), V(0, -6, 1.7), V(0, -3, 1.7), V(0, -1.6, 1.7),
+   V(0, -1.5, 1.7), V(-0.2, -0.6, 1.7), V(-0.5, 0.3, 1.7)], false, 'centripetal');
 const tgtCurve = new THREE.CatmullRomCurve3(
-  [V(0, -3, 2), V(0, -3, 1.6), V(0, -2, 1.7), V(0, 2, 1.7), V(0, 3, 1.7)], false, 'centripetal');
-const HFOV = [58.7, 61.9, 65.2, 73.7, 73.7];           // มุมมองแนวนอน (องศา)
+  [V(0, -3, 2), V(0, -3, 1.6), V(0, -2, 1.7), V(0, 2, 1.7), V(0, 3, 1.7),
+   V(0.05, 3, 1.7), V(2, 2.2, 1.7), V(4, 0.3, 1.7)], false, 'centripetal');
+const HFOV = [58.7, 61.9, 65.2, 73.7, 73.7, 73.7, 73.7, 73.7];   // มุมมองแนวนอน (องศา)
 const WALK_FPS = 30;
 const WALK_DUR = (KEYS[KEYS.length - 1] - KEYS[0]) / WALK_FPS;
 const BLEND = 0.8;                                     // เวลาเลื่อนจากมุมที่ดูอยู่ไปจุดเริ่มต้น (วินาที)
@@ -188,9 +194,60 @@ addEventListener('resize', () => {
   if (walkT !== null) setFov(walkCam.fov);
 });
 
+// ====== หิมะตกวนหน้าบ้าน ======
+const SNOW_COUNT = 2500;
+const SNOW = { xMin: -14, xMax: 14, zMin: 3.8, zMax: 22, top: 10 };   // ด้านหน้าบ้าน (z > ประตู)
+function flakeTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grd.addColorStop(0, 'rgba(255,255,255,1)');
+  grd.addColorStop(0.5, 'rgba(255,255,255,0.7)');
+  grd.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+const rand = (a, b) => a + Math.random() * (b - a);
+const snowPos = new Float32Array(SNOW_COUNT * 3);
+const snowSpeed = new Float32Array(SNOW_COUNT);
+const snowPhase = new Float32Array(SNOW_COUNT);
+for (let i = 0; i < SNOW_COUNT; i++) {
+  snowPos[i * 3] = rand(SNOW.xMin, SNOW.xMax);
+  snowPos[i * 3 + 1] = rand(0, SNOW.top);
+  snowPos[i * 3 + 2] = rand(SNOW.zMin, SNOW.zMax);
+  snowSpeed[i] = rand(0.4, 1.1);
+  snowPhase[i] = rand(0, Math.PI * 2);
+}
+const snowGeo = new THREE.BufferGeometry();
+snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPos, 3));
+const snow = new THREE.Points(snowGeo, new THREE.PointsMaterial({
+  size: 0.16, map: flakeTexture(), transparent: true, opacity: 0.95,
+  depthWrite: false, sizeAttenuation: true, toneMapped: false
+}));
+snow.frustumCulled = false;
+scene.add(snow);
+
+function updateSnow(dt, t) {
+  for (let i = 0; i < SNOW_COUNT; i++) {
+    const k = i * 3;
+    snowPos[k + 1] -= snowSpeed[i] * dt;
+    snowPos[k] += Math.sin(t * 0.8 + snowPhase[i]) * 0.35 * dt;
+    snowPos[k + 2] += Math.cos(t * 0.6 + snowPhase[i]) * 0.2 * dt;
+    if (snowPos[k + 1] < 0) {            // ตกถึงพื้น -> กลับไปเริ่มใหม่ด้านบน (วนไปเรื่อยๆ)
+      snowPos[k] = rand(SNOW.xMin, SNOW.xMax);
+      snowPos[k + 1] = SNOW.top;
+      snowPos[k + 2] = rand(SNOW.zMin, SNOW.zMax);
+    }
+  }
+  snowGeo.attributes.position.needsUpdate = true;
+}
+
 renderer.setAnimationLoop(() => {
   const dt = Math.min(clock.getDelta(), 0.1);
   if (mixer) mixer.update(dt);
+  updateSnow(dt, clock.elapsedTime);
 
   if (walkT !== null) {
     walkT += dt;
