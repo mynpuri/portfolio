@@ -52,7 +52,7 @@ const sun = new THREE.DirectionalLight(0xfff1d9, 2.2);
 sun.position.set(5, 10, 10);
 scene.add(sun);
 
-// ไฟในบ้าน (ตำแหน่งแปลงจาก Blender: x, z, -y)
+// ไฟในบ้าน (พิกัดแปลงจาก Blender: x, z, -y)
 const ceiling = new THREE.PointLight(0xffd199, CEILING_LIGHT, 12, 1.5);
 ceiling.position.set(0, 3.0, -0.3);
 scene.add(ceiling);
@@ -71,8 +71,45 @@ controls.minDistance = 4;
 controls.maxDistance = 40;
 controls.update();
 
+// ====== กล้องเดินเข้าบ้าน (ทำในหน้าเว็บเอง ไม่พึ่งกล้องจากไฟล์ .glb) ======
+const V = (x, y, z) => new THREE.Vector3(x, z, -y);   // พิกัด Blender -> three.js
+const KEYS = [1, 50, 95, 130, 200];                    // เฟรมเดียวกับใน Blender
+const camCurve = new THREE.CatmullRomCurve3(
+  [V(6, -15, 3), V(0, -10.5, 2), V(0, -6, 1.7), V(0, -3, 1.7), V(0, -1.6, 1.7)], false, 'centripetal');
+const tgtCurve = new THREE.CatmullRomCurve3(
+  [V(0, -3, 2), V(0, -3, 1.6), V(0, -2, 1.7), V(0, 2, 1.7), V(0, 3, 1.7)], false, 'centripetal');
+const HFOV = [58.7, 61.9, 65.2, 73.7, 73.7];           // มุมมองแนวนอน (องศา)
+const WALK_FPS = 30;
+const WALK_DUR = (KEYS[KEYS.length - 1] - KEYS[0]) / WALK_FPS;
+const BLEND = 0.8;                                     // เวลาเลื่อนจากมุมที่ดูอยู่ไปจุดเริ่มต้น (วินาที)
+
+const walkCam = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.05, 500);
+const tmpTarget = new THREE.Vector3();
+let walkT = null;                                      // null = ไม่ได้เดิน
+let fromPos = new THREE.Vector3(), fromQuat = new THREE.Quaternion(), fromFov = 50;
+
+function setFov(hfovDeg) {
+  const aspect = innerWidth / innerHeight;
+  const v = 2 * Math.atan(Math.tan(hfovDeg * Math.PI / 360) / aspect) * 180 / Math.PI;
+  walkCam.aspect = aspect;
+  walkCam.fov = Math.min(v, 100);
+  walkCam.updateProjectionMatrix();
+}
+
+function sampleWalk(t) {
+  const f = Math.min(KEYS[0] + t * WALK_FPS, KEYS[KEYS.length - 1]);
+  let i = 0;
+  while (i < KEYS.length - 2 && f > KEYS[i + 1]) i++;
+  const local = (f - KEYS[i]) / (KEYS[i + 1] - KEYS[i]);
+  const u = Math.min((i + local) / (KEYS.length - 1), 1);
+  camCurve.getPoint(u, walkCam.position);
+  tgtCurve.getPoint(u, tmpTarget);
+  walkCam.lookAt(tmpTarget);
+  setFov(THREE.MathUtils.lerp(HFOV[i], HFOV[i + 1], local));
+}
+
 let activeCam = orbitCam;
-let root = null, mixer = null, actions = [], finished = 0, signs = [];
+let root = null, mixer = null, actions = [], signs = [];
 const clock = new THREE.Clock();
 const hint = document.getElementById('hint');
 const backBtn = document.getElementById('back');
@@ -81,7 +118,7 @@ const loading = document.getElementById('loading');
 new GLTFLoader().load(MODEL_URL, (gltf) => {
   root = gltf.scene;
   scene.add(root);
-  root.traverse(o => { if (/CLICK/i.test(o.name)) signs.push(o); });
+  root.traverse(o => { if (/ClickSign/i.test(o.name)) signs.push(o); });
   mixer = new THREE.AnimationMixer(root);
   actions = gltf.animations.map(clip => {
     const a = mixer.clipAction(clip);
@@ -89,8 +126,6 @@ new GLTFLoader().load(MODEL_URL, (gltf) => {
     a.clampWhenFinished = true;
     return a;
   });
-  mixer.addEventListener('finished', () => { if (++finished >= actions.length) backBtn.style.display = 'block'; });
-  window.__blenderCam = gltf.cameras[0] || null;
   loading.style.display = 'none';
   hint.style.opacity = 1;
 }, (e) => {
@@ -109,22 +144,22 @@ function isHouse(o) {
 }
 
 function enterHouse() {
-  if (!actions.length) return;
-  finished = 0;
+  if (!root || walkT !== null) return;
   hint.style.opacity = 0;
   signs.forEach(s => s.visible = false);
   controls.enabled = false;
-  if (window.__blenderCam) {
-    activeCam = window.__blenderCam;
-    activeCam.aspect = innerWidth / innerHeight;
-    activeCam.updateProjectionMatrix();
-  }
-  actions.forEach(a => { a.reset(); a.play(); });
+  fromPos.copy(orbitCam.position);
+  fromQuat.copy(orbitCam.quaternion);
+  fromFov = orbitCam.fov;
+  walkT = -BLEND;
+  activeCam = walkCam;
+  actions.forEach(a => { a.reset(); a.play(); });   // ประตูเปิด
 }
 
 function leaveHouse() {
-  actions.forEach(a => { a.stop(); });
-  mixer && mixer.setTime(0);
+  actions.forEach(a => a.stop());
+  if (mixer) mixer.setTime(0);
+  walkT = null;
   activeCam = orbitCam;
   controls.enabled = true;
   signs.forEach(s => s.visible = true);
@@ -148,12 +183,32 @@ renderer.domElement.addEventListener('pointerup', e => {
 
 addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
-  [orbitCam, window.__blenderCam].forEach(c => { if (c) { c.aspect = innerWidth / innerHeight; c.updateProjectionMatrix(); } });
+  orbitCam.aspect = innerWidth / innerHeight;
+  orbitCam.updateProjectionMatrix();
+  if (walkT !== null) setFov(walkCam.fov);
 });
 
 renderer.setAnimationLoop(() => {
-  const dt = clock.getDelta();
+  const dt = Math.min(clock.getDelta(), 0.1);
   if (mixer) mixer.update(dt);
+
+  if (walkT !== null) {
+    walkT += dt;
+    if (walkT < 0) {
+      // เลื่อนกล้องจากมุมที่ดูอยู่ ไปยังจุดเริ่มเดิน
+      sampleWalk(0);
+      const toPos = walkCam.position.clone(), toQuat = walkCam.quaternion.clone(), toFov = walkCam.fov;
+      const k = THREE.MathUtils.smoothstep((walkT + BLEND) / BLEND, 0, 1);
+      walkCam.position.lerpVectors(fromPos, toPos, k);
+      walkCam.quaternion.slerpQuaternions(fromQuat, toQuat, k);
+      walkCam.fov = THREE.MathUtils.lerp(fromFov, toFov, k);
+      walkCam.updateProjectionMatrix();
+    } else {
+      sampleWalk(Math.min(walkT, WALK_DUR));
+      if (walkT >= WALK_DUR) backBtn.style.display = 'block';
+    }
+  }
+
   if (controls.enabled) controls.update();
   renderer.render(scene, activeCam);
 });
